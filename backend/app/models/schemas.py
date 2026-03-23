@@ -1,53 +1,48 @@
 """
 Pydantic 数据模型
 """
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, field_validator, HttpUrl
 from datetime import datetime
-from enum import Enum
+from typing import List, Dict, Optional, Tuple, Any
 
-
-# ============ Enums ============
-
-class MusicStyle(str, Enum):
-    """音乐风格"""
-    ELECTRONIC = "electronic"
-    CLASSICAL = "classical"
-    ROCK = "rock"
-    JAZZ = "jazz"
-    AMBIENT = "ambient"
-    CHIPTUNE = "chiptune"
-
-
-class CommitType(str, Enum):
-    """Commit 类型（通过消息分析）"""
-    FEATURE = "feature"
-    FIX = "fix"
-    REFACTOR = "refactor"
-    DOCS = "docs"
-    STYLE = "style"
-    TEST = "test"
-    CHORE = "chore"
-    MERGE = "merge"
-    OTHER = "other"
+from app.models.enums import MusicStyle, CommitType, ScaleType
 
 
 # ============ Request Models ============
 
 class RepoRequest(BaseModel):
     """仓库请求"""
-    repo_url: str = Field(..., example="https://github.com/facebook/react")
-    style: MusicStyle = MusicStyle.ELECTRONIC
+    repo_url: str = Field(
+        ..., 
+        min_length=1,
+        example="https://github.com/facebook/react"
+    )
+    branch: str = Field(default="main", min_length=1)
     max_commits: int = Field(default=200, ge=10, le=500)
-    branch: str = "main"
+    
+    @field_validator('repo_url')
+    @classmethod
+    def validate_repo_url(cls, v: str) -> str:
+        v = v.strip().rstrip('/')
+        if not v:
+            raise ValueError("Repository URL cannot be empty")
+        return v
 
 
 class MusicGenerateRequest(BaseModel):
     """音乐生成请求"""
-    repo_url: str
-    style: MusicStyle = MusicStyle.ELECTRONIC
+    repo_url: str = Field(..., min_length=1)
+    style: MusicStyle = Field(default=MusicStyle.ELECTRONIC)
     bpm: int = Field(default=120, ge=60, le=200)
-    scale: str = "C_MAJOR"
+    scale: ScaleType = Field(default=ScaleType.C_MAJOR)
     max_commits: int = Field(default=200, ge=10, le=500)
+    branch: str = Field(default="main")
+    
+    # 高级选项
+    include_drums: bool = Field(default=True)
+    include_bass: bool = Field(default=True)
+    include_chords: bool = Field(default=True)
+    melody_complexity: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 # ============ Internal Models ============
@@ -57,11 +52,44 @@ class CommitData(BaseModel):
     sha: str
     message: str
     author: str
+    author_email: str = ""
     timestamp: datetime
-    additions: int
-    deletions: int
-    files_changed: int
-    commit_type: CommitType
+    additions: int = 0
+    deletions: int = 0
+    files_changed: int = 0
+    file_types: List[str] = Field(default_factory=list)
+    commit_type: CommitType = CommitType.OTHER
+    
+    @property
+    def total_changes(self) -> int:
+        return self.additions + self.deletions
+    
+    @property
+    def impact_score(self) -> float:
+        """计算提交影响分数 (0-1)"""
+        changes = self.total_changes
+        if changes == 0:
+            return 0.1
+        elif changes < 10:
+            return 0.2
+        elif changes < 50:
+            return 0.4
+        elif changes < 200:
+            return 0.6
+        elif changes < 500:
+            return 0.8
+        else:
+            return 1.0
+
+
+class ContributorStats(BaseModel):
+    """贡献者统计"""
+    name: str
+    email: str = ""
+    commits: int
+    additions: int = 0
+    deletions: int = 0
+    percentage: float = 0.0
 
 
 class CommitAnalysis(BaseModel):
@@ -69,34 +97,50 @@ class CommitAnalysis(BaseModel):
     total_commits: int
     date_range_days: int
     avg_commits_per_day: float
-    top_contributors: list[dict]
-    commit_type_distribution: dict[str, int]
-    activity_hours: list[int]  # 24小时活跃度分布
-    commits: list[CommitData]
+    total_additions: int
+    total_deletions: int
+    top_contributors: List[ContributorStats]
+    commit_type_distribution: Dict[str, int]
+    file_type_distribution: Dict[str, int]
+    activity_hours: List[int]  # 24小时活跃度
+    activity_weekdays: List[int]  # 7天活跃度
+    commits: List[CommitData]
+    
+    # 派生特征
+    activity_level: str = "moderate"  # low, moderate, high, intense
+    dominant_type: str = "other"
 
 
 class NoteEvent(BaseModel):
     """音符事件"""
-    pitch: int          # MIDI 音高 (0-127)
-    velocity: int       # 力度 (0-127)
-    start_time: float   # 开始时间（拍）
-    duration: float     # 持续时间（拍）
-    channel: int = 0    # MIDI 通道
+    pitch: int = Field(ge=0, le=127)
+    velocity: int = Field(ge=0, le=127)
+    start_time: float = Field(ge=0)
+    duration: float = Field(gt=0)
+    channel: int = Field(default=0, ge=0, le=15)
 
 
 class TrackData(BaseModel):
     """音轨数据"""
     name: str
-    instrument: int     # MIDI 乐器编号
-    notes: list[NoteEvent]
+    instrument: int = Field(ge=0)
+    notes: List[NoteEvent]
+    volume: float = Field(default=1.0, ge=0.0, le=1.0)
+    pan: float = Field(default=0.0, ge=-1.0, le=1.0)  # -1 左, 0 中, 1 右
 
 
 class MusicData(BaseModel):
-    """音乐数据（供前端 Tone.js 使用）"""
+    """音乐数据"""
     bpm: int
-    time_signature: tuple[int, int] = (4, 4)
+    time_signature: Tuple[int, int] = (4, 4)
+    total_beats: float
     total_duration: float  # 秒
-    tracks: list[TrackData]
+    scale: str
+    style: str
+    tracks: List[TrackData]
+    
+    # 元数据
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ============ Response Models ============
@@ -105,12 +149,17 @@ class RepoInfoResponse(BaseModel):
     """仓库信息响应"""
     name: str
     full_name: str
-    description: str | None
+    description: Optional[str] = None
     stars: int
     forks: int
-    language: str | None
+    watchers: int = 0
+    language: Optional[str] = None
+    topics: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    default_branch: str = "main"
+    open_issues: int = 0
+    license: Optional[str] = None
 
 
 class AnalysisResponse(BaseModel):
@@ -125,12 +174,41 @@ class MusicResponse(BaseModel):
     repo_name: str
     style: MusicStyle
     bpm: int
+    scale: str
     duration: float
+    total_tracks: int
+    total_notes: int
     music_data: MusicData
-    midi_base64: str | None = None  # Base64 编码的 MIDI 文件
+    midi_base64: Optional[str] = None
+    
+    # 统计
+    commits_processed: int
+    generation_time_ms: float
+
+
+class StyleInfo(BaseModel):
+    """风格信息"""
+    id: str
+    name: str
+    description: str
+    emoji: str
+    bpm_range: Tuple[int, int]
+
+
+class StylesResponse(BaseModel):
+    """风格列表响应"""
+    styles: List[StyleInfo]
+
+
+class HealthResponse(BaseModel):
+    """健康检查响应"""
+    status: str
+    version: str
+    timestamp: datetime
 
 
 class ErrorResponse(BaseModel):
     """错误响应"""
     error: str
-    detail: str | None = None
+    detail: Optional[str] = None
+    code: Optional[str] = None
